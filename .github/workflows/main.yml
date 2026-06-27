@@ -1,0 +1,77 @@
+name: Data Pipeline CI
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: infrastructure
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: infrastructure
+        run: terraform validate
+
+      - name: Terraform Apply
+        working-directory: infrastructure
+        env:
+          TF_VAR_s3_bucket_name: etl-pipeline-bucket
+        run: terraform apply -auto-approve
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Create Sample CSV
+        run: |
+          echo "id,value" > input.csv
+          echo "1,100" >> input.csv
+          echo "2,200" >> input.csv
+
+      - name: Upload Sample File
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          aws --endpoint-url=http://localhost:4566 s3 cp input.csv s3://etl-pipeline-bucket/raw/input.csv
+
+      - name: Build Docker Image
+        run: docker build -t etl-app .
+
+      - name: Run ETL
+        run: |
+          docker run --network host \
+          -e AWS_ENDPOINT_URL=http://localhost:4566 \
+          -e S3_BUCKET_NAME=etl-pipeline-bucket \
+          etl-app
+
+      - name: Verify Output
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          aws --endpoint-url=http://localhost:4566 s3 ls s3://etl-pipeline-bucket/processed/
+          aws --endpoint-url=http://localhost:4566 s3api head-object --bucket etl-pipeline-bucket --key processed/output.csv
